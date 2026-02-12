@@ -60,23 +60,25 @@ async def get_available_tokens_from_api() -> List[Dict]:
                     "blockchain": item.get("blockchain", "near")
                 })
         
-        # Remove duplicates by symbol (prefer first occurrence)
-        seen = set()
-        unique_tokens = []
-        for token in tokens:
-            if token["symbol"].upper() not in seen:
-                seen.add(token["symbol"].upper())
-                unique_tokens.append(token)
-        
-        if not unique_tokens:
+        if not tokens:
             raise ValueError("Can't get supported tokens - API returned empty list")
         
+        # Sort: NEAR chain first, then alphabetically by chain
+        def sort_key(t):
+            chain = t.get("blockchain", "near").lower()
+            # NEAR and Aurora first (priority 0), then others alphabetically
+            if chain in ["near", "aurora"]:
+                return (0, chain, t["symbol"].upper())
+            return (1, chain, t["symbol"].upper())
+        
+        sorted_tokens = sorted(tokens, key=sort_key)
+        
         # Update cache
-        _token_cache = unique_tokens
+        _token_cache = sorted_tokens
         _cache_timestamp = datetime.now()
         
-        print(f"[KNOWLEDGE] Loaded {len(unique_tokens)} tokens from API")
-        return unique_tokens
+        print(f"[KNOWLEDGE] Loaded {len(sorted_tokens)} tokens from API (all chains)")
+        return sorted_tokens
         
     except httpx.HTTPError as e:
         print(f"[KNOWLEDGE] HTTP error fetching tokens from API: {e}")
@@ -101,13 +103,39 @@ def get_token_symbols_list(tokens: List[Dict]) -> List[str]:
     return [t["symbol"] for t in tokens]
 
 
-def get_token_by_symbol(symbol: str, tokens: List[Dict]) -> Optional[Dict]:
-    """Find a token by its symbol (case-insensitive)"""
+def get_token_symbols_with_chain(tokens: List[Dict]) -> List[str]:
+    """Extract symbols with chain prefix: [CHAIN] SYMBOL"""
+    return [f"[{t.get('blockchain', 'near').upper()}] {t['symbol']}" for t in tokens]
+
+
+def get_token_by_symbol(symbol: str, tokens: List[Dict], chain: str = None) -> Optional[Dict]:
+    """
+    Find a token by its symbol (case-insensitive).
+    If chain is specified, match both symbol and chain.
+    If chain is None, prefer NEAR chain token.
+    """
     symbol_upper = symbol.upper()
+    
+    # If chain specified, find exact match
+    if chain:
+        chain_lower = chain.lower()
+        for token in tokens:
+            if token["symbol"].upper() == symbol_upper and token.get("blockchain", "near").lower() == chain_lower:
+                return token
+        return None
+    
+    # No chain specified - prefer NEAR chain
+    near_match = None
+    first_match = None
     for token in tokens:
         if token["symbol"].upper() == symbol_upper:
-            return token
-    return None
+            if first_match is None:
+                first_match = token
+            if token.get("blockchain", "near").lower() in ["near", "aurora"]:
+                near_match = token
+                break
+    
+    return near_match or first_match
 
 
 def format_token_list_for_display(tokens: List[Dict]) -> str:
@@ -128,6 +156,28 @@ def format_token_list_for_display(tokens: List[Dict]) -> str:
         lines.append(f"\n**{chain.title()} Tokens:**")
         for token in sorted(chain_tokens[:20], key=lambda x: x["symbol"]):  # Limit to 20 per chain
             lines.append(f"  • {token['symbol']} - {token['name']}")
+    
+    return "\n".join(lines)
+
+
+def format_tokens_with_chain_prefix(tokens: List[Dict], limit: int = 80) -> str:
+    """
+    Format tokens as [CHAIN] SYMBOL with NEAR chain first.
+    This shows all chain variations of each token.
+    """
+    if not tokens:
+        return "No tokens available."
+    
+    # Tokens are already sorted with NEAR first
+    lines = ["**Available Tokens (with chain):**"]
+    
+    for token in tokens[:limit]:
+        chain = token.get("blockchain", "near").upper()
+        symbol = token["symbol"]
+        lines.append(f"• [{chain}] {symbol}")
+    
+    if len(tokens) > limit:
+        lines.append(f"\n...and {len(tokens) - limit} more tokens")
     
     return "\n".join(lines)
 

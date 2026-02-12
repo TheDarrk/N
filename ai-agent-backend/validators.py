@@ -1,5 +1,6 @@
 """
 Validation utilities for wallet addresses and token names.
+Supports: NEAR, EVM, Solana, Tron, TON
 """
 from typing import Dict, Optional, List, Tuple
 import re
@@ -13,12 +14,6 @@ def validate_near_address(address: str) -> bool:
     NEAR addresses can be:
     - Named accounts: alice.near, alice.testnet (alphanumeric with dots, hyphens, underscores)
     - Implicit accounts: 64-character hex string
-    
-    Args:
-        address: The wallet address to validate
-        
-    Returns:
-        bool: True if valid NEAR address format
     """
     if not address or not isinstance(address, str):
         return False
@@ -30,9 +25,6 @@ def validate_near_address(address: str) -> bool:
         return True
     
     # Check for named account
-    # Pattern: lowercase letters, numbers, hyphens, underscores
-    # Must end with .near or .testnet (or just be alphanumeric for subaccounts)
-    # Min 2 chars, max 64 chars
     if re.match(r'^[a-z0-9_-]{2,}(\.[a-z0-9_-]{2,})*\.?(near|testnet)$', address.lower()):
         return True
     
@@ -46,12 +38,7 @@ def validate_near_address(address: str) -> bool:
 def validate_evm_address(address: str) -> bool:
     """
     Validate Ethereum/EVM wallet address format.
-    
-    Args:
-        address: The wallet address to validate
-        
-    Returns:
-        bool: True if valid EVM address format (basic validation)
+    Works for ETH, ARB, BASE, OP, BSC, Gnosis, etc.
     """
     if not address or not isinstance(address, str):
         return False
@@ -64,29 +51,152 @@ def validate_evm_address(address: str) -> bool:
     
     try:
         from web3 import Web3
-        # Use Web3 checksum validation if available
         return Web3.is_address(address)
     except ImportError:
-        # Fallback to basic format validation
         return True
+
+
+def validate_solana_address(address: str) -> bool:
+    """
+    Validate Solana wallet address format.
+    Solana addresses are base58-encoded, 32-44 characters long.
+    """
+    if not address or not isinstance(address, str):
+        return False
+    
+    address = address.strip()
+    
+    # Solana addresses: base58 chars (no 0, O, I, l), typically 32-44 chars
+    if not re.match(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$', address):
+        return False
+    
+    return True
+
+
+def validate_tron_address(address: str) -> bool:
+    """
+    Validate Tron wallet address format.
+    Tron addresses start with 'T' and are 34 characters (base58).
+    """
+    if not address or not isinstance(address, str):
+        return False
+    
+    address = address.strip()
+    
+    # Tron address: starts with T, 34 chars, base58
+    if not re.match(r'^T[1-9A-HJ-NP-Za-km-z]{33}$', address):
+        return False
+    
+    return True
+
+
+def validate_ton_address(address: str) -> bool:
+    """
+    Validate TON wallet address format.
+    TON addresses can be:
+    - Raw: 0:hex (workchain:hash)
+    - User-friendly: EQ or UQ prefix, base64, ~48 chars
+    """
+    if not address or not isinstance(address, str):
+        return False
+    
+    address = address.strip()
+    
+    # Raw format: 0:64hex or -1:64hex
+    if re.match(r'^-?[0-9]+:[a-fA-F0-9]{64}$', address):
+        return True
+    
+    # User-friendly format: EQ or UQ prefix, base64url, ~48 chars
+    if re.match(r'^(EQ|UQ)[A-Za-z0-9_-]{46,48}$', address):
+        return True
+    
+    return False
+
+
+def validate_address_for_chain(address: str, chain: str) -> bool:
+    """
+    Validate a wallet address for a specific blockchain.
+    
+    Args:
+        address: The wallet address to validate
+        chain: Chain identifier (e.g., 'near', 'eth', 'solana', 'tron', 'ton')
+    
+    Returns:
+        bool: True if the address format is valid for the given chain
+    """
+    chain_lower = chain.lower().strip()
+    
+    # Map chain names to validators
+    chain_validators = {
+        'near': validate_near_address,
+        'aurora': validate_near_address,  # Aurora uses NEAR addresses
+        'eth': validate_evm_address,
+        'ethereum': validate_evm_address,
+        'arb': validate_evm_address,
+        'arbitrum': validate_evm_address,
+        'base': validate_evm_address,
+        'op': validate_evm_address,
+        'optimism': validate_evm_address,
+        'bsc': validate_evm_address,
+        'gnosis': validate_evm_address,
+        'polygon': validate_evm_address,
+        'avalanche': validate_evm_address,
+        'solana': validate_solana_address,
+        'sol': validate_solana_address,
+        'tron': validate_tron_address,
+        'trx': validate_tron_address,
+        'ton': validate_ton_address,
+    }
+    
+    validator = chain_validators.get(chain_lower)
+    if validator:
+        return validator(address)
+    
+    # Unknown chain — accept any non-empty string as we can't validate
+    return bool(address and len(address) > 5)
 
 
 def get_chain_from_address(address: str) -> Optional[str]:
     """
     Determine the blockchain from address format.
     
-    Args:
-        address: The wallet address
-        
     Returns:
-        str: 'NEAR', 'EVM', or None if unrecognized
+        str: 'near', 'evm', 'solana', 'tron', 'ton', or None if unrecognized
     """
     if validate_near_address(address):
-        return 'NEAR'
+        return 'near'
     elif validate_evm_address(address):
-        return 'EVM'
+        return 'evm'
+    elif validate_tron_address(address):
+        return 'tron'
+    elif validate_ton_address(address):
+        return 'ton'
+    elif validate_solana_address(address):
+        return 'solana'
     return None
 
+
+def get_chain_address_format(chain: str) -> str:
+    """
+    Get a human-readable description of the expected address format for a chain.
+    Useful for error messages when address validation fails.
+    """
+    formats = {
+        'near': 'NEAR address (e.g., alice.near or 64-char hex)',
+        'eth': 'EVM address starting with 0x (42 characters)',
+        'ethereum': 'EVM address starting with 0x (42 characters)',
+        'arb': 'EVM address starting with 0x (42 characters)',
+        'base': 'EVM address starting with 0x (42 characters)',
+        'solana': 'Solana address (32-44 base58 characters)',
+        'sol': 'Solana address (32-44 base58 characters)',
+        'tron': 'Tron address starting with T (34 characters)',
+        'trx': 'Tron address starting with T (34 characters)',
+        'ton': 'TON address (EQ/UQ prefix or raw format)',
+    }
+    return formats.get(chain.lower(), f'{chain} wallet address')
+
+
+# ─── Token Matching ───────────────────────────────────────
 
 def fuzzy_match_token(
     input_token: str, 
@@ -95,18 +205,6 @@ def fuzzy_match_token(
 ) -> Dict[str, any]:
     """
     Find the best matching token from available tokens using fuzzy matching.
-    
-    Args:
-        input_token: The user's input token name
-        available_tokens: List of valid token symbols
-        threshold: Minimum similarity score (0-100) to consider a match
-        
-    Returns:
-        Dict with keys:
-            - exact_match: bool
-            - suggested_token: str or None
-            - confidence: int (0-100)
-            - alternatives: List of other possible matches
     """
     if not input_token or not available_tokens:
         return {
@@ -153,14 +251,6 @@ def fuzzy_match_token(
 def validate_token_pair(token_in: str, token_out: str, available_tokens: List[str]) -> Tuple[bool, str, Optional[str], Optional[str]]:
     """
     Validate and potentially correct a token pair.
-    
-    Args:
-        token_in: Input token symbol
-        token_out: Output token symbol
-        available_tokens: List of available tokens
-        
-    Returns:
-        Tuple of (is_valid, message, corrected_token_in, corrected_token_out)
     """
     match_in = fuzzy_match_token(token_in, available_tokens)
     match_out = fuzzy_match_token(token_out, available_tokens)

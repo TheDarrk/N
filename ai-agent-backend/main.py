@@ -14,7 +14,7 @@ load_dotenv()
 from agents import process_message
 from knowledge_base import get_available_tokens_from_api, format_token_list_for_display
 
-app = FastAPI(title="NEAR AI Agent")
+app = FastAPI(title="Neptune AI Agent")
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,6 +31,8 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str
     account_id: Optional[str] = None
+    wallet_addresses: Optional[Dict[str, str]] = None  # {"near": "x.near", "eth": "0x...", "solana": "..."}
+    balances: Optional[Dict[str, str]] = None          # {"near": "10.5", "eth": "1.2"}
 
 class ChatResponse(BaseModel):
     response: str
@@ -54,8 +56,14 @@ async def chat_endpoint(request: ChatRequest):
     history = session_data["history"]
     
     # 2. Process Message via Agent Orchestrator with conversation history
+    wallet_addresses = request.wallet_addresses or {}
+    connected_chains = list(wallet_addresses.keys()) if wallet_addresses else []
+    
     user_context = {
         "account_id": request.account_id,
+        "connected_chains": connected_chains,
+        "wallet_addresses": wallet_addresses,
+        "balances": request.balances or {},
         "history": history  # Pass conversation history to agent
     }
     result = await process_message(user_msg, current_state, user_context)

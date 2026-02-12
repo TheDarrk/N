@@ -15,10 +15,12 @@ from prompts import MASTER_SYSTEM_PROMPT
 
 
 # Initialize LLM with NEAR AI endpoint
+api_key = os.getenv("NEAR_AI_API_KEY") or os.getenv("OPENAI_API_KEY")
+
 llm = ChatOpenAI(
     model="openai/gpt-oss-120b",
     temperature=0.3,
-    openai_api_key=os.getenv("NEAR_AI_API_KEY"),
+    openai_api_key=api_key,
     openai_api_base="https://cloud-api.near.ai/v1"
 )
 
@@ -28,14 +30,18 @@ llm_with_tools = llm.bind_tools(TOOL_LIST)
 # System message for the agent
 SYSTEM_MESSAGE = MASTER_SYSTEM_PROMPT + """
 
-You have access to these tools:
-- get_available_tokens_tool: Get list of all tokens that can be swapped
-- validate_token_names_tool: Check if token names are correct and suggest corrections
-- get_swap_quote_tool: Get real-time quote for a token swap
-- prepare_swap_transaction_tool: Prepare transaction after user confirms
+**Runtime Tool Reference (quick lookup):**
+- get_available_tokens_tool → List ALL supported tokens (use ONLY for "show all tokens" queries)
+- get_token_chains_tool → Chains for a SPECIFIC token (use for "options for ETH", "where is AURORA?", etc.)
+- validate_token_names_tool → Fix token name typos/misspellings
+- get_swap_quote_tool → Get a live swap quote (for new swap requests only)
+- confirm_swap_tool → Confirm and prepare transaction (after user says "yes" to a quote)
+- create_payment_link_tool → Create HOT Pay payment link (for "create payment link", "accept payment", "generate invoice")
+- check_payment_status_tool → Check received payments (for "has anyone paid?", "payment status")
 
-Use tools when you need specific data. For general questions, answer directly.
-Be conversational, friendly, and concise.
+REMEMBER: If user asks about a SPECIFIC token → get_token_chains_tool. If user wants ALL tokens → get_available_tokens_tool.
+Payment links/invoices → create_payment_link_tool. Payment status → check_payment_status_tool.
+Be conversational, friendly, and concise. You are Neptune AI.
 """
 
 
@@ -118,8 +124,23 @@ async def process_message(
             elif msg["role"] == "ai":
                 messages.append(AIMessage(content=msg["content"]))
         
-        # Add current message
-        messages.append(HumanMessage(content=f"{user_msg}\n\n[User wallet: {account_id}]"))
+        # Add current message with wallet context (multi-chain via HOT Kit)
+        connected_chains = user_context.get("connected_chains", [])
+        wallet_addresses = user_context.get("wallet_addresses", {})
+        balances = user_context.get("balances", {})
+        
+        wallet_info = f"[User wallet: {account_id}"
+        if connected_chains:
+            wallet_info += f" | connected_chains: [{', '.join(connected_chains)}]"
+        if wallet_addresses:
+            addr_parts = [f"{chain}: {addr}" for chain, addr in wallet_addresses.items()]
+            wallet_info += f" | addresses: {', '.join(addr_parts)}"
+        if balances:
+            bal_parts = [f"{chain}: {amt}" for chain, amt in balances.items()]
+            wallet_info += f" | balances: {', '.join(bal_parts)}"
+        wallet_info += "]"
+        
+        messages.append(HumanMessage(content=f"{user_msg}\n\n{wallet_info}"))
         
         print(f"[AGENT] Sending {len(messages)} messages (including {len(recent_history)} recent history items)")
         
@@ -187,25 +208,47 @@ async def process_message(
             # Get final response from LLM with tool results
             print(f"[AGENT] Getting final response from LLM with {len(tool_messages)} tool results")
             
-            # For NEAR AI: Use HumanMessage instead of ToolMessage (workaround)
-            # Include last exchange for context, then add tool results as HumanMessages
+            # Build the final message sequence for tool response
+            # NEAR AI workaround: Do NOT include the AIMessage with tool_calls
+            # (NEAR AI returns empty responses when it encounters tool_calls in AIMessage).
+            # Instead, merge user query + tool results into a single HumanMessage
+            # to avoid consecutive HumanMessages which also cause empty responses.
             tool_response_messages = [SystemMessage(content=SYSTEM_MESSAGE)]
             
-            # Add last exchange if available (for context on confirmations)
-            if len(recent_history) >= 2:
-                last_user = recent_history[-2]
-                last_ai = recent_history[-1]
-                if last_user.get("role") == "user" and last_ai.get("role") == "ai":
-                    tool_response_messages.append(HumanMessage(content=last_user["content"]))
-                    tool_response_messages.append(AIMessage(content=last_ai["content"]))
+            # Include history
+            for msg in recent_history:
+                if msg["role"] == "user":
+                    tool_response_messages.append(HumanMessage(content=msg["content"]))
+                elif msg["role"] == "ai":
+                    tool_response_messages.append(AIMessage(content=msg["content"]))
             
-            # Add current exchange + tool results
-            tool_response_messages.append(HumanMessage(content=f"{user_msg}\n\n[User wallet: {account_id}]"))
-            # Note: Don't add AIMessage with tool_calls, NEAR AI doesn't need it
-            tool_response_messages.extend(tool_messages)  # Tool results as HumanMessages
+            # Combine user message + tool results into ONE HumanMessage
+            # This avoids consecutive HumanMessages that confuse NEAR AI
+            # Use a bridge AIMessage to separate user query from tool results
+            # so the LLM understands: user asked → I fetched data → here it is
+            tool_results_text = "\n\n".join(
+                msg.content for msg in tool_messages
+            )
+            
+            # User's original question
+            connected_chains = user_context.get("connected_chains", [])
+            chains_str = ', '.join(connected_chains) if connected_chains else 'none'
+            tool_response_messages.append(HumanMessage(content=f"{user_msg}\n\n[User wallet: {account_id} | connected_chains: [{chains_str}]]"))
+            
+            # Bridge AIMessage: makes the LLM think it "decided" to fetch data
+            tool_names_called = ", ".join(tc["name"] for tc in response.tool_calls)
+            tool_response_messages.append(AIMessage(content=f"Let me look that up using {tool_names_called}."))
+            
+            # Tool results as a HumanMessage with clear instruction
+            tool_response_messages.append(HumanMessage(
+                content=(
+                    f"Here are the results:\n\n{tool_results_text}\n\n"
+                    f"Now respond to the user based on this data. Be helpful and concise."
+                )
+            ))
             
             # Debug: Show message types being sent
-            msg_types = [f"{type(m).__name__}({getattr(m, 'content', 'tool_calls')[:30] if isinstance(getattr(m, 'content', ''), str) else 'tool_calls'}...)" for m in tool_response_messages]
+            msg_types = [f"{type(m).__name__}" for m in tool_response_messages]
             print(f"[AGENT] Tool response sequence: {' → '.join(msg_types)}")
             
             print(f"[AGENT] Sending {len(tool_response_messages)} messages to LLM for final response")
